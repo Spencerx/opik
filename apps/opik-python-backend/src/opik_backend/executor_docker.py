@@ -23,14 +23,14 @@ meter = metrics.get_meter("docker_executor")
 # Create histogram metrics for container operations
 container_creation_histogram = meter.create_histogram(
     name="container_creation_latency",
-    description="Latency of container creation operations in seconds",
-    unit="s",
+    description="Latency of container creation operations in milliseconds",
+    unit="ms",
 )
 
 container_stop_histogram = meter.create_histogram(
     name="container_stop_latency",
-    description="Latency of container stop operations in seconds",
-    unit="s",
+    description="Latency of container stop operations in milliseconds",
+    unit="ms",
 )
 
 # Create a gauge metric to track the number of available containers in the pool
@@ -47,6 +47,7 @@ class DockerExecutor(CodeExecutorBase):
         self.docker_image = os.getenv("PYTHON_CODE_EXECUTOR_IMAGE_NAME", "opik-sandbox-executor-python")
         self.docker_tag = os.getenv("PYTHON_CODE_EXECUTOR_IMAGE_TAG", "latest")
         self.pool_check_interval = int(os.getenv("PYTHON_CODE_EXECUTOR_POOL_CHECK_INTERVAL_IN_SECONDS", "3"))
+        self.network_disabled = os.getenv("PYTHON_CODE_EXECUTOR_ALLOW_NETWORK", "false").lower() != "true"
 
         self.client = docker.from_env()
         self.instance_id = str(uuid7())
@@ -130,9 +131,12 @@ class DockerExecutor(CodeExecutorBase):
     def _update_container_pool_size_metric(self):
         """Update the container pool size metric with the current number of containers in the pool."""
         pool_size = self.container_pool.qsize()
-        container_pool_size_gauge.record(pool_size)
+        container_pool_size_gauge.set(pool_size)
         logger.debug(f"Current container pool size: {pool_size}")
         return pool_size
+
+    def _calculate_latency_ms(self, start_time):
+        return (time.time() - start_time) * 1000  # Convert to milliseconds
 
     def create_container(self):
         # Record the start time for detailed container creation metrics
@@ -144,7 +148,7 @@ class DockerExecutor(CodeExecutorBase):
             mem_limit="256mb",
             cpu_shares=2,
             detach=True,
-            network_disabled=True,
+            network_disabled=self.network_disabled,
             security_opt=["no-new-privileges"],
             labels=self.container_labels
         )
@@ -153,10 +157,10 @@ class DockerExecutor(CodeExecutorBase):
         self.container_pool.put(new_container)
 
         # Calculate and record the latency for the direct container creation
-        latency = time.time() - start_time
+        latency = self._calculate_latency_ms(start_time)
         container_creation_histogram.record(latency, attributes={"method": "create_container"})
 
-        logger.info(f"Created container, id '{new_container.id}' in {latency:.3f} seconds")
+        logger.info(f"Created container, id '{new_container.id}' in {latency:.3f} milliseconds")
 
     def release_container(self, container):
         self.releaser_executor.submit(self.async_release, container)
@@ -187,10 +191,10 @@ class DockerExecutor(CodeExecutorBase):
             container.remove(force=True)
 
             # Calculate and record the latency
-            latency = time.time() - start_time
+            latency = self._calculate_latency_ms(start_time)
             container_stop_histogram.record(latency, attributes={"method": "stop_container"})
 
-            logger.info(f"Stopped container {container.id} in {latency:.3f} seconds")
+            logger.info(f"Stopped container {container.id} in {latency:.3f} milliseconds")
         except Exception as e:
             logger.error(f"Failed to stop container: {e}")
 
